@@ -1,5 +1,5 @@
 name: Web
-version: 1.2.0
+version: 1.3.0
 main: com.example.webplayers.WebPlayersPlugin
 api-version: '1.21'
 author: Egor
@@ -10,7 +10,23 @@ commands:
     description: Shows list of online players with country and ping
     usage: /webp
     aliases: [web_players]
+    permission: web.players
   webe:
     description: Shows server PC equipment information
     usage: /webe
     aliases: [web_equipment]
+    permission: web.equipment
+
+permissions:
+  web.players:
+    description: Allows viewing the list of online players
+    default: true
+  web.equipment:
+    description: Allows viewing server equipment information
+    default: op
+  web.*:
+    description: Grants access to all Web plugin commands
+    default: op
+    children:
+      web.players: true
+      web.equipment: true
