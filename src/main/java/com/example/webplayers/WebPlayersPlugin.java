@@ -11,26 +11,90 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class WebPlayersPlugin extends JavaPlugin {
 
+    // GeoIP Cache
+    private final Map<String, CachedCountry> countryCache = new ConcurrentHashMap<>();
+
+    // Configuration values
+    private String geoipApiUrl;
+    private int geoipTimeout;
+    private long cacheTtl;
+    private boolean geoipEnabled;
+
+    private int pingExcellent;
+    private int pingGood;
+    private int pingPoor;
+
+    private int cpuLow;
+    private int cpuMedium;
+    private int cpuHigh;
+
+    private boolean showCountry;
+    private boolean showPing;
+    private boolean showCpuUsage;
+    private boolean showDiskSpace;
+
     @Override
     public void onEnable() {
+        // Save default config if it doesn't exist
+        saveDefaultConfig();
+
+        // Load configuration
+        loadConfiguration();
+
         getLogger().info("WebPlayers plugin enabled!");
+        getLogger().info("GeoIP caching enabled with TTL: " + cacheTtl + " seconds");
     }
 
     @Override
     public void onDisable() {
+        // Clear cache
+        countryCache.clear();
         getLogger().info("WebPlayers plugin disabled!");
+    }
+
+    private void loadConfiguration() {
+        // GeoIP settings
+        geoipApiUrl = getConfig().getString("geoip.api-url", "https://ipapi.co/");
+        geoipTimeout = getConfig().getInt("geoip.timeout", 3000);
+        cacheTtl = getConfig().getLong("geoip.cache-ttl", 86400);
+        geoipEnabled = getConfig().getBoolean("geoip.enabled", true);
+
+        // Ping thresholds
+        pingExcellent = getConfig().getInt("ping-colors.excellent", 50);
+        pingGood = getConfig().getInt("ping-colors.good", 100);
+        pingPoor = getConfig().getInt("ping-colors.poor", 200);
+
+        // CPU thresholds
+        cpuLow = getConfig().getInt("cpu-colors.low", 30);
+        cpuMedium = getConfig().getInt("cpu-colors.medium", 60);
+        cpuHigh = getConfig().getInt("cpu-colors.high", 85);
+
+        // Features
+        showCountry = getConfig().getBoolean("features.show-country", true);
+        showPing = getConfig().getBoolean("features.show-ping", true);
+        showCpuUsage = getConfig().getBoolean("features.show-cpu-usage", true);
+        showDiskSpace = getConfig().getBoolean("features.show-disk-space", true);
     }
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (command.getName().equalsIgnoreCase("webp")) {
+            // Check permission
+            if (!sender.hasPermission("web.players")) {
+                sender.sendMessage(translateColor(getConfig().getString("messages.no-permission",
+                    "&cYou don't have permission to use this command!")));
+                return true;
+            }
+
             if (!(sender instanceof Player)) {
-                sender.sendMessage("This command can only be used by players!");
+                sender.sendMessage(translateColor(getConfig().getString("messages.console-only",
+                    "This command can only be used by players!")));
                 return true;
             }
 
@@ -38,166 +102,234 @@ public class WebPlayersPlugin extends JavaPlugin {
             List<Player> onlinePlayers = new ArrayList<>(Bukkit.getOnlinePlayers());
 
             if (onlinePlayers.isEmpty()) {
-                player.sendMessage(ChatColor.RED + "No players online!");
+                player.sendMessage(translateColor(getConfig().getString("messages.no-players",
+                    "&cNo players online!")));
                 return true;
             }
 
-            // Заголовок
-            player.sendMessage(ChatColor.GOLD + "" + ChatColor.BOLD + "════════════");
-            player.sendMessage(ChatColor.YELLOW + "" + ChatColor.BOLD + "  Online Players (" + onlinePlayers.size() + "):");
-            player.sendMessage(ChatColor.GOLD + "" + ChatColor.BOLD + "════════════");
+            // Send header
+            String header = translateColor(getConfig().getString("messages.players-header",
+                "&6&l════════════"));
+            String title = translateColor(getConfig().getString("messages.players-title",
+                "&e&l  Online Players ({count}):").replace("{count}", String.valueOf(onlinePlayers.size())));
 
-            // Для каждого игрока
+            player.sendMessage(header);
+            player.sendMessage(title);
+            player.sendMessage(header);
+
+            // Collect player data asynchronously
+            List<CompletableFuture<PlayerInfo>> futures = new ArrayList<>();
+
             for (Player onlinePlayer : onlinePlayers) {
-                final String playerName = onlinePlayer.getName();
-                final int ping = onlinePlayer.getPing();
-                final String ip = onlinePlayer.getAddress().getAddress().getHostAddress();
+                CompletableFuture<PlayerInfo> future = CompletableFuture.supplyAsync(() -> {
+                    PlayerInfo info = new PlayerInfo();
+                    info.name = onlinePlayer.getName();
+                    info.ping = onlinePlayer.getPing();
+                    info.ip = onlinePlayer.getAddress().getAddress().getHostAddress();
 
-                // Асинхронно получаем страну
-                Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-                    String country = getCountryFromIP(ip);
-                    
-                    // Возвращаемся в основной поток для отправки сообщения
-                    Bukkit.getScheduler().runTask(WebPlayersPlugin.this, () -> {
-                        String message = ChatColor.DARK_GRAY + "  ▪ " +
-                                ChatColor.WHITE + "" + ChatColor.BOLD + playerName +
-                                ChatColor.DARK_GRAY + " | " +
-                                ChatColor.GREEN + "🌍 " + country +
-                                ChatColor.DARK_GRAY + " | " +
-                                getPingColor(ping) + "📡 " + ping + "ms";
-                        
-                        player.sendMessage(message);
+                    if (geoipEnabled && showCountry) {
+                        info.country = getCountryFromIP(info.ip);
+                    } else {
+                        info.country = "N/A";
+                    }
+
+                    return info;
+                });
+
+                futures.add(future);
+            }
+
+            // Wait for all futures to complete and display in order
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenRun(() -> {
+                    // Back to main thread for sending messages
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        for (CompletableFuture<PlayerInfo> future : futures) {
+                            try {
+                                PlayerInfo info = future.get();
+                                StringBuilder message = new StringBuilder();
+                                message.append(ChatColor.DARK_GRAY).append("  ▪ ");
+                                message.append(ChatColor.WHITE).append(ChatColor.BOLD).append(info.name);
+
+                                if (showCountry) {
+                                    message.append(ChatColor.DARK_GRAY).append(" | ");
+                                    message.append(ChatColor.GREEN).append("🌍 ").append(info.country);
+                                }
+
+                                if (showPing) {
+                                    message.append(ChatColor.DARK_GRAY).append(" | ");
+                                    message.append(getPingColor(info.ping)).append("📡 ").append(info.ping).append("ms");
+                                }
+
+                                player.sendMessage(message.toString());
+                            } catch (Exception e) {
+                                getLogger().warning("Failed to get player info: " + e.getMessage());
+                            }
+                        }
                     });
                 });
-            }
 
             return true;
         }
-        
+
         if (command.getName().equalsIgnoreCase("webe")) {
+            // Check permission
+            if (!sender.hasPermission("web.equipment")) {
+                sender.sendMessage(translateColor(getConfig().getString("messages.no-permission",
+                    "&cYou don't have permission to use this command!")));
+                return true;
+            }
+
             if (!(sender instanceof Player)) {
-                sender.sendMessage("This command can only be used by players!");
+                sender.sendMessage(translateColor(getConfig().getString("messages.console-only",
+                    "This command can only be used by players!")));
                 return true;
             }
 
             Player player = (Player) sender;
-            
-            // Заголовок
-            player.sendMessage(ChatColor.GOLD + "" + ChatColor.BOLD + "════════════");
-            player.sendMessage(ChatColor.YELLOW + "" + ChatColor.BOLD + "  Server Equipment:");
-            player.sendMessage(ChatColor.GOLD + "" + ChatColor.BOLD + "════════════");
-            
-            // Получаем информацию о системе
+
+            // Send header
+            String header = translateColor(getConfig().getString("messages.equipment-header",
+                "&6&l════════════"));
+            String title = translateColor(getConfig().getString("messages.equipment-title",
+                "&e&l  Server Equipment:"));
+
+            player.sendMessage(header);
+            player.sendMessage(title);
+            player.sendMessage(header);
+
+            // Get system information
             Runtime runtime = Runtime.getRuntime();
-            
+
             // OS
             String os = System.getProperty("os.name") + " " + System.getProperty("os.version");
-            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " + 
-                    ChatColor.AQUA + "💻 OS: " + 
+            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " +
+                    ChatColor.AQUA + "💻 OS: " +
                     ChatColor.WHITE + os);
-            
+
             // Architecture
             String arch = System.getProperty("os.arch");
-            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " + 
-                    ChatColor.AQUA + "🔧 Arch: " + 
+            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " +
+                    ChatColor.AQUA + "🔧 Arch: " +
                     ChatColor.WHITE + arch);
-            
-            // CPU Name - попытка получить
+
+            // CPU Name
             String cpuName = getCPUName();
-            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " + 
-                    ChatColor.AQUA + "⚙️ CPU: " + 
+            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " +
+                    ChatColor.AQUA + "⚙️ CPU: " +
                     ChatColor.WHITE + cpuName);
-            
+
             // CPU Cores
             int processors = runtime.availableProcessors();
-            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " + 
-                    ChatColor.AQUA + "🔄 Cores: " + 
+            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " +
+                    ChatColor.AQUA + "🔄 Cores: " +
                     ChatColor.WHITE + processors);
-            
-            // CPU Usage основного потока
-            double cpuUsage = getServerThreadCPUUsage();
-            ChatColor cpuColor = getCPUUsageColor(cpuUsage);
-            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " + 
-                    ChatColor.AQUA + "📊 CPU Load: " + 
-                    cpuColor + String.format("%.1f%%", cpuUsage));
-            
+
+            // CPU Usage - removed blocking Thread.sleep()
+            if (showCpuUsage) {
+                double cpuUsage = getSystemCPUUsage();
+                ChatColor cpuColor = getCPUUsageColor(cpuUsage);
+                player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " +
+                        ChatColor.AQUA + "📊 CPU Load: " +
+                        cpuColor + String.format("%.1f%%", cpuUsage));
+            }
+
             // RAM
             long maxMemory = runtime.maxMemory() / (1024 * 1024); // MB
             long totalMemory = runtime.totalMemory() / (1024 * 1024); // MB
             long freeMemory = runtime.freeMemory() / (1024 * 1024); // MB
             long usedMemory = totalMemory - freeMemory;
-            
-            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " + 
-                    ChatColor.AQUA + "🧠 RAM: " + 
+
+            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " +
+                    ChatColor.AQUA + "🧠 RAM: " +
                     ChatColor.WHITE + usedMemory + "MB" +
                     ChatColor.GRAY + " / " +
                     ChatColor.WHITE + maxMemory + "MB");
-            
+
             // Disk Space
-            try {
-                java.io.File serverDir = new java.io.File(".");
-                long totalSpace = serverDir.getTotalSpace() / (1024 * 1024 * 1024); // GB
-                long usableSpace = serverDir.getUsableSpace() / (1024 * 1024 * 1024); // GB
-                long usedSpace = totalSpace - usableSpace;
-                
-                player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " + 
-                        ChatColor.AQUA + "💾 Disk: " + 
-                        ChatColor.WHITE + usedSpace + "GB" +
-                        ChatColor.GRAY + " / " +
-                        ChatColor.WHITE + totalSpace + "GB");
-            } catch (Exception e) {
-                player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " + 
-                        ChatColor.AQUA + "💾 Disk: " + 
-                        ChatColor.RED + "N/A");
+            if (showDiskSpace) {
+                try {
+                    java.io.File serverDir = new java.io.File(".");
+                    long totalSpace = serverDir.getTotalSpace() / (1024 * 1024 * 1024); // GB
+                    long usableSpace = serverDir.getUsableSpace() / (1024 * 1024 * 1024); // GB
+                    long usedSpace = totalSpace - usableSpace;
+
+                    player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " +
+                            ChatColor.AQUA + "💾 Disk: " +
+                            ChatColor.WHITE + usedSpace + "GB" +
+                            ChatColor.GRAY + " / " +
+                            ChatColor.WHITE + totalSpace + "GB");
+                } catch (Exception e) {
+                    player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " +
+                            ChatColor.AQUA + "💾 Disk: " +
+                            ChatColor.RED + "N/A");
+                }
             }
-            
+
             // Java Version
             String javaVersion = System.getProperty("java.version");
-            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " + 
-                    ChatColor.AQUA + "☕ Java: " + 
+            player.sendMessage(ChatColor.DARK_GRAY + "  ▪ " +
+                    ChatColor.AQUA + "☕ Java: " +
                     ChatColor.WHITE + javaVersion);
 
             return true;
         }
-        
+
         return false;
     }
 
     private String getCountryFromIP(String ip) {
-        // Если localhost - возвращаем Local
-        if (ip.equals("127.0.0.1") || ip.equals("0:0:0:0:0:0:0:1") || ip.startsWith("192.168.") || ip.startsWith("10.")) {
+        // If localhost - return Local
+        if (ip.equals("127.0.0.1") || ip.equals("0:0:0:0:0:0:0:1") ||
+            ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) {
             return "Local";
         }
 
+        // Check cache first
+        CachedCountry cached = countryCache.get(ip);
+        if (cached != null && !cached.isExpired(cacheTtl)) {
+            return cached.country;
+        }
+
         try {
-            // Используем бесплатный API ipapi.co
-            URL url = new URL("https://ipapi.co/" + ip + "/country_name/");
+            // Use configured API URL
+            URL url = new URL(geoipApiUrl + ip + "/country_name/");
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
-            conn.setConnectTimeout(3000);
-            conn.setReadTimeout(3000);
+            conn.setConnectTimeout(geoipTimeout);
+            conn.setReadTimeout(geoipTimeout);
 
             BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
             String country = reader.readLine();
             reader.close();
 
-            return country != null && !country.isEmpty() ? country : "Unknown";
+            if (country != null && !country.isEmpty()) {
+                // Cache the result
+                countryCache.put(ip, new CachedCountry(country));
+                return country;
+            }
+
+            return "Unknown";
         } catch (Exception e) {
+            // Return cached value even if expired, better than nothing
+            if (cached != null) {
+                return cached.country;
+            }
             return "Unknown";
         }
     }
 
     private ChatColor getPingColor(int ping) {
-        if (ping < 50) return ChatColor.GREEN;
-        if (ping < 100) return ChatColor.YELLOW;
-        if (ping < 200) return ChatColor.GOLD;
+        if (ping < pingExcellent) return ChatColor.GREEN;
+        if (ping < pingGood) return ChatColor.YELLOW;
+        if (ping < pingPoor) return ChatColor.GOLD;
         return ChatColor.RED;
     }
-    
+
     private String getCPUName() {
         try {
             String os = System.getProperty("os.name").toLowerCase();
-            
+
             if (os.contains("win")) {
                 // Windows
                 Process process = Runtime.getRuntime().exec("wmic cpu get name");
@@ -227,57 +359,77 @@ public class WebPlayersPlugin extends JavaPlugin {
         }
         return "Unknown";
     }
-    
-    private double getServerThreadCPUUsage() {
+
+    /**
+     * Get system-wide CPU usage (non-blocking)
+     * Uses OperatingSystemMXBean to get system load average
+     */
+    private double getSystemCPUUsage() {
         try {
-            java.lang.management.ThreadMXBean threadMXBean = 
-                java.lang.management.ManagementFactory.getThreadMXBean();
-            
-            // Находим основной поток сервера
-            long serverThreadId = -1;
-            for (Thread thread : Thread.getAllStackTraces().keySet()) {
-                if (thread.getName().equals("Server thread")) {
-                    serverThreadId = thread.getId();
-                    break;
+            java.lang.management.OperatingSystemMXBean osBean =
+                java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+
+            // Try to get system CPU load (Java 7+)
+            if (osBean instanceof com.sun.management.OperatingSystemMXBean) {
+                com.sun.management.OperatingSystemMXBean sunOsBean =
+                    (com.sun.management.OperatingSystemMXBean) osBean;
+                double cpuLoad = sunOsBean.getCpuLoad();
+
+                // getCpuLoad returns value between 0.0 and 1.0
+                if (cpuLoad >= 0) {
+                    return cpuLoad * 100.0;
                 }
             }
-            
-            if (serverThreadId == -1) {
-                return 0.0;
+
+            // Fallback: use load average (Unix/Linux only)
+            double loadAverage = osBean.getSystemLoadAverage();
+            if (loadAverage >= 0) {
+                int processors = osBean.getAvailableProcessors();
+                return (loadAverage / processors) * 100.0;
             }
-            
-            // Получаем время CPU
-            long cpuTime1 = threadMXBean.getThreadCpuTime(serverThreadId);
-            long realTime1 = System.nanoTime();
-            
-            // Ждём немного
-            try {
-                Thread.sleep(100);
-            } catch (InterruptedException e) {
-                return 0.0;
-            }
-            
-            long cpuTime2 = threadMXBean.getThreadCpuTime(serverThreadId);
-            long realTime2 = System.nanoTime();
-            
-            // Вычисляем процент
-            long cpuTimeDiff = cpuTime2 - cpuTime1;
-            long realTimeDiff = realTime2 - realTime1;
-            
-            if (realTimeDiff > 0) {
-                return (cpuTimeDiff * 100.0) / realTimeDiff;
-            }
-            
+
         } catch (Exception e) {
             // Ignore
         }
         return 0.0;
     }
-    
+
     private ChatColor getCPUUsageColor(double usage) {
-        if (usage < 30) return ChatColor.GREEN;
-        if (usage < 60) return ChatColor.YELLOW;
-        if (usage < 85) return ChatColor.GOLD;
+        if (usage < cpuLow) return ChatColor.GREEN;
+        if (usage < cpuMedium) return ChatColor.YELLOW;
+        if (usage < cpuHigh) return ChatColor.GOLD;
         return ChatColor.RED;
+    }
+
+    private String translateColor(String text) {
+        return ChatColor.translateAlternateColorCodes('&', text);
+    }
+
+    /**
+     * Cached country information
+     */
+    private static class CachedCountry {
+        final String country;
+        final long timestamp;
+
+        CachedCountry(String country) {
+            this.country = country;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        boolean isExpired(long ttlSeconds) {
+            long ageSeconds = (System.currentTimeMillis() - timestamp) / 1000;
+            return ageSeconds > ttlSeconds;
+        }
+    }
+
+    /**
+     * Player information container
+     */
+    private static class PlayerInfo {
+        String name;
+        int ping;
+        String ip;
+        String country;
     }
 }

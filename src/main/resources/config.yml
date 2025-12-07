@@ -1,0 +1,47 @@
+# Web Plugin Configuration
+
+# GeoIP Settings
+geoip:
+  # API endpoint for IP geolocation
+  api-url: "https://ipapi.co/"
+  # Connection timeout in milliseconds
+  timeout: 3000
+  # Cache TTL in seconds (86400 = 24 hours)
+  cache-ttl: 86400
+  # Enable/disable GeoIP lookup
+  enabled: true
+
+# Ping color thresholds (in milliseconds)
+ping-colors:
+  excellent: 50    # < 50ms = GREEN
+  good: 100        # < 100ms = YELLOW
+  poor: 200        # < 200ms = GOLD
+                   # >= 200ms = RED
+
+# CPU usage color thresholds (in percent)
+cpu-colors:
+  low: 30          # < 30% = GREEN
+  medium: 60       # < 60% = YELLOW
+  high: 85         # < 85% = GOLD
+                   # >= 85% = RED
+
+# Messages
+messages:
+  no-players: "&cNo players online!"
+  players-header: "&6&l════════════"
+  players-title: "&e&l  Online Players ({count}):"
+  equipment-header: "&6&l════════════"
+  equipment-title: "&e&l  Server Equipment:"
+  console-only: "This command can only be used by players!"
+  no-permission: "&cYou don't have permission to use this command!"
+
+# Feature toggles
+features:
+  # Show country information for players
+  show-country: true
+  # Show ping information for players
+  show-ping: true
+  # Show CPU usage in equipment command
+  show-cpu-usage: true
+  # Show disk space in equipment command
+  show-disk-space: true
