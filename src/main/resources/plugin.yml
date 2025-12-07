@@ -1,0 +1,16 @@
+name: Web
+version: 1.2.0
+main: com.example.webplayers.WebPlayersPlugin
+api-version: '1.21'
+author: Egor
+description: Shows online players and server equipment info
+
+commands:
+  webp:
+    description: Shows list of online players with country and ping
+    usage: /webp
+    aliases: [web_players]
+  webe:
+    description: Shows server PC equipment information
+    usage: /webe
+    aliases: [web_equipment]
