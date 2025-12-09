@@ -1,5 +1,5 @@
 name: Web
-version: 1.3.0
+version: 1.4.2
 main: com.example.webplayers.WebPlayersPlugin
 api-version: '1.21'
 author: Egor
@@ -16,6 +16,11 @@ commands:
     usage: /webe
     aliases: [web_equipment]
     permission: web.equipment
+  webtps:
+    description: Toggle TPS and MSPT display in boss bar
+    usage: /webtps
+    aliases: [web_tps, wtps]
+    permission: web.tps
 
 permissions:
   web.players:
@@ -24,9 +29,13 @@ permissions:
   web.equipment:
     description: Allows viewing server equipment information
     default: op
+  web.tps:
+    description: Allows toggling TPS boss bar display
+    default: op
   web.*:
     description: Grants access to all Web plugin commands
     default: op
     children:
       web.players: true
       web.equipment: true
+      web.tps: true

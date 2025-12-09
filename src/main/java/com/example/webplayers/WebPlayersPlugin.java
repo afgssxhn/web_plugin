@@ -6,6 +6,13 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.boss.BarColor;
+import org.bukkit.boss.BarStyle;
+import org.bukkit.boss.BossBar;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -15,7 +22,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class WebPlayersPlugin extends JavaPlugin {
+public class WebPlayersPlugin extends JavaPlugin implements Listener {
 
     // GeoIP Cache
     private final Map<String, CachedCountry> countryCache = new ConcurrentHashMap<>();
@@ -39,6 +46,17 @@ public class WebPlayersPlugin extends JavaPlugin {
     private boolean showCpuUsage;
     private boolean showDiskSpace;
 
+    // TPS Boss Bar Management
+    private final Map<UUID, BossBar> activeTpsBars = new ConcurrentHashMap<>();
+    private BukkitRunnable tpsUpdateTask = null;
+
+    // TPS Configuration
+    private int tpsUpdateInterval;
+    private boolean tpsShowMspt;
+    private double tpsExcellent;
+    private double tpsGood;
+    private double tpsPoor;
+
     @Override
     public void onEnable() {
         // Save default config if it doesn't exist
@@ -47,12 +65,24 @@ public class WebPlayersPlugin extends JavaPlugin {
         // Load configuration
         loadConfiguration();
 
+        // Register event listener for TPS bars
+        getServer().getPluginManager().registerEvents(this, this);
+
         getLogger().info("WebPlayers plugin enabled!");
         getLogger().info("GeoIP caching enabled with TTL: " + cacheTtl + " seconds");
     }
 
     @Override
     public void onDisable() {
+        // Stop TPS update task
+        stopTpsUpdateTask();
+
+        // Remove all active TPS boss bars
+        for (BossBar bossBar : activeTpsBars.values()) {
+            bossBar.removeAll();
+        }
+        activeTpsBars.clear();
+
         // Clear cache
         countryCache.clear();
         getLogger().info("WebPlayers plugin disabled!");
@@ -80,6 +110,13 @@ public class WebPlayersPlugin extends JavaPlugin {
         showPing = getConfig().getBoolean("features.show-ping", true);
         showCpuUsage = getConfig().getBoolean("features.show-cpu-usage", true);
         showDiskSpace = getConfig().getBoolean("features.show-disk-space", true);
+
+        // TPS settings
+        tpsUpdateInterval = getConfig().getInt("tps-settings.update-interval", 40);
+        tpsShowMspt = getConfig().getBoolean("tps-settings.show-mspt", true);
+        tpsExcellent = getConfig().getDouble("tps-settings.color-thresholds.excellent", 19.0);
+        tpsGood = getConfig().getDouble("tps-settings.color-thresholds.good", 16.0);
+        tpsPoor = getConfig().getDouble("tps-settings.color-thresholds.poor", 10.0);
     }
 
     @Override
@@ -275,12 +312,45 @@ public class WebPlayersPlugin extends JavaPlugin {
             return true;
         }
 
+        if (command.getName().equalsIgnoreCase("webtps")) {
+            // Check permission
+            if (!sender.hasPermission("web.tps")) {
+                sender.sendMessage(translateColor(getConfig().getString("messages.no-permission",
+                    "&cYou don't have permission to use this command!")));
+                return true;
+            }
+
+            if (!(sender instanceof Player)) {
+                sender.sendMessage(translateColor(getConfig().getString("messages.console-only",
+                    "This command can only be used by players!")));
+                return true;
+            }
+
+            Player player = (Player) sender;
+            UUID playerId = player.getUniqueId();
+
+            // Toggle logic
+            if (activeTpsBars.containsKey(playerId)) {
+                // Disable TPS display
+                removeTpsBar(player);
+                player.sendMessage(translateColor(getConfig().getString("messages.tps-disabled",
+                    "&cТPS display disabled.")));
+            } else {
+                // Enable TPS display
+                addTpsBar(player);
+                player.sendMessage(translateColor(getConfig().getString("messages.tps-enabled",
+                    "&aТPS display enabled! Boss bar will update every 2 seconds.")));
+            }
+
+            return true;
+        }
+
         return false;
     }
 
     private String getCountryFromIP(String ip) {
         // If localhost - return Local
-        if (ip.equals("127.0.0.1") || ip.equals("0:0:0:0:0:0:0:1") ||
+        if (ip.equals("127.0.0.1") || ip.equals("0:0:0:0:0:0:0:1") || ip.equals("::1") ||
             ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) {
             return "Local";
         }
@@ -403,6 +473,163 @@ public class WebPlayersPlugin extends JavaPlugin {
 
     private String translateColor(String text) {
         return ChatColor.translateAlternateColorCodes('&', text);
+    }
+
+    /**
+     * Add TPS boss bar for a player
+     */
+    private void addTpsBar(Player player) {
+        // Create boss bar with initial values
+        BossBar bossBar = Bukkit.createBossBar(
+            "Loading TPS data...",
+            BarColor.GREEN,
+            BarStyle.SOLID
+        );
+
+        bossBar.addPlayer(player);
+        bossBar.setVisible(true);
+
+        // Store in map
+        activeTpsBars.put(player.getUniqueId(), bossBar);
+
+        // Start update task if not already running
+        startTpsUpdateTask();
+    }
+
+    /**
+     * Remove TPS boss bar for a player
+     */
+    private void removeTpsBar(Player player) {
+        UUID playerId = player.getUniqueId();
+        BossBar bossBar = activeTpsBars.remove(playerId);
+
+        if (bossBar != null) {
+            bossBar.removeAll();
+        }
+
+        // Stop update task if no more players
+        if (activeTpsBars.isEmpty()) {
+            stopTpsUpdateTask();
+        }
+    }
+
+    /**
+     * Start the TPS update task (one task for all players)
+     */
+    private void startTpsUpdateTask() {
+        // Don't start if already running
+        if (tpsUpdateTask != null) {
+            return;
+        }
+
+        tpsUpdateTask = new BukkitRunnable() {
+            @Override
+            public void run() {
+                // No players with active bars - shouldn't happen, but safety check
+                if (activeTpsBars.isEmpty()) {
+                    stopTpsUpdateTask();
+                    return;
+                }
+
+                // Get TPS and MSPT from server
+                double tps = Bukkit.getServer().getTPS()[0]; // 1-minute average
+                double mspt = Bukkit.getServer().getAverageTickTime();
+
+                // Format title
+                String title = formatTpsTitle(tps, mspt);
+
+                // Determine color based on TPS
+                BarColor color = getTpsColor(tps);
+
+                // Calculate progress (20.0 TPS = 100%, 0.0 TPS = 0%)
+                double progress = Math.max(0.0, Math.min(1.0, tps / 20.0));
+
+                // Update all active boss bars
+                for (BossBar bossBar : activeTpsBars.values()) {
+                    bossBar.setTitle(title);
+                    bossBar.setColor(color);
+                    bossBar.setProgress(progress);
+                }
+            }
+        };
+
+        // Schedule task: delay 0 (start immediately), period from config
+        tpsUpdateTask.runTaskTimer(this, 0L, tpsUpdateInterval);
+    }
+
+    /**
+     * Stop the TPS update task
+     */
+    private void stopTpsUpdateTask() {
+        if (tpsUpdateTask != null) {
+            tpsUpdateTask.cancel();
+            tpsUpdateTask = null;
+        }
+    }
+
+    /**
+     * Format TPS title with color codes
+     */
+    private String formatTpsTitle(double tps, double mspt) {
+        StringBuilder title = new StringBuilder();
+
+        // TPS part with color
+        ChatColor tpsColor = getTpsChatColor(tps);
+        title.append(tpsColor).append("TPS: ").append(String.format("%.1f", tps));
+
+        // MSPT part (if enabled)
+        if (tpsShowMspt) {
+            ChatColor msptColor = getMsptChatColor(mspt);
+            title.append(ChatColor.DARK_GRAY).append(" | ");
+            title.append(msptColor).append("MSPT: ").append(String.format("%.1f", mspt)).append("ms");
+        }
+
+        return title.toString();
+    }
+
+    /**
+     * Get boss bar color based on TPS
+     */
+    private BarColor getTpsColor(double tps) {
+        if (tps >= tpsExcellent) return BarColor.GREEN;
+        if (tps >= tpsGood) return BarColor.YELLOW;
+        if (tps >= tpsPoor) return BarColor.PINK;
+        return BarColor.RED;
+    }
+
+    /**
+     * Get chat color based on TPS (for title text)
+     */
+    private ChatColor getTpsChatColor(double tps) {
+        if (tps >= tpsExcellent) return ChatColor.GREEN;
+        if (tps >= tpsGood) return ChatColor.YELLOW;
+        if (tps >= tpsPoor) return ChatColor.GOLD;
+        return ChatColor.RED;
+    }
+
+    /**
+     * Get chat color based on MSPT
+     * Ideal MSPT is < 50ms (for 20 TPS)
+     */
+    private ChatColor getMsptChatColor(double mspt) {
+        if (mspt < 50) return ChatColor.GREEN;      // Excellent
+        if (mspt < 75) return ChatColor.YELLOW;     // Good
+        if (mspt < 100) return ChatColor.GOLD;      // Poor
+        return ChatColor.RED;                        // Critical
+    }
+
+    /**
+     * Handle player quit event - remove TPS bar
+     */
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        Player player = event.getPlayer();
+        UUID playerId = player.getUniqueId();
+
+        // Remove TPS bar if player has one
+        if (activeTpsBars.containsKey(playerId)) {
+            removeTpsBar(player);
+        }
     }
 
     /**

@@ -25,6 +25,19 @@ cpu-colors:
   high: 85         # < 85% = GOLD
                    # >= 85% = RED
 
+# TPS display settings
+tps-settings:
+  # Update interval in ticks (20 ticks = 1 second, 40 ticks = 2 seconds)
+  update-interval: 40
+  # Show MSPT (milliseconds per tick) alongside TPS
+  show-mspt: true
+  # TPS color thresholds
+  color-thresholds:
+    excellent: 19.0  # >= 19.0 TPS = GREEN
+    good: 16.0       # >= 16.0 TPS = YELLOW
+    poor: 10.0       # >= 10.0 TPS = GOLD (ORANGE)
+                     # < 10.0 TPS = RED
+
 # Messages
 messages:
   no-players: "&cNo players online!"
@@ -34,6 +47,8 @@ messages:
   equipment-title: "&e&l  Server Equipment:"
   console-only: "This command can only be used by players!"
   no-permission: "&cYou don't have permission to use this command!"
+  tps-enabled: "&aТPS display enabled! Boss bar will update every 2 seconds."
+  tps-disabled: "&cТPS display disabled."
 
 # Feature toggles
 features:
